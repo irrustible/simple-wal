@@ -76,11 +76,9 @@ where T: Borrow<[u8]> {
     }
 
     #[cfg(not(unix))]
-    pub fn create_with_capacity(path: &Path, max_length: usize, capacity: usize) -> Result<Self, CreateError> {
+    pub fn create(path: &Path, max_length: usize) -> Result<Self, CreateError> {
         let file = OpenOptions::new().create_new(true).open(path).map_err(|e| CreateError::Open(e))?;
-        let sources = Vec::with_capacity(capacity);
-        let slices = Vec::with_capacity(capacity);
-        Ok(WAL { file, offset: 0, max_length, queued: 0, sources, slices })
+        Ok(WAL { file, offset: 0, max_length, queued: 0, sources: Vec::new(), slices: Vec::new() })
     }
 
     #[cfg(unix)]
@@ -95,9 +93,11 @@ where T: Borrow<[u8]> {
     }
 
     #[cfg(not(unix))]
-    pub fn create(path: &Path, max_length: usize) -> Result<Self, CreateError> {
+    pub fn create_with_capacity(path: &Path, max_length: usize, capacity: usize) -> Result<Self, CreateError> {
         let file = OpenOptions::new().create_new(true).open(path).map_err(|e| CreateError::Open(e))?;
-        Ok(WAL { file, offset: 0, max_length, queued: 0, sources: Vec::new(), slices: Vec::new() })
+        let sources = Vec::with_capacity(capacity);
+        let slices = Vec::with_capacity(capacity);
+        Ok(WAL { file, offset: 0, max_length, queued: 0, sources, slices })
     }
 
     pub fn open(path: &Path, max_length: usize) -> Result<Self, OpenError> {
@@ -107,6 +107,18 @@ where T: Borrow<[u8]> {
             Err(OpenError::TooBig)
         } else {
             Ok(WAL { file, offset, max_length, queued: 0, sources: Vec::new(), slices: Vec::new() })
+        }
+    }
+
+    pub fn open_with_capacity(path: &Path, max_length: usize, capacity: usize) -> Result<Self, OpenError> {
+        let mut file = OpenOptions::new().append(true).open(path).map_err(|e| OpenError::Open(e))?;
+        let offset = file.seek(SeekFrom::End(0)).map_err(OpenError::Seek)? as usize;
+        if offset >= max_length {
+            Err(OpenError::TooBig)
+        } else {
+            let sources = Vec::with_capacity(capacity);
+            let slices = Vec::with_capacity(capacity);
+            Ok(WAL { file, offset, max_length, queued: 0, sources, slices })
         }
     }
 
