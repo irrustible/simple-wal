@@ -76,6 +76,25 @@ where T: Borrow<[u8]> {
     }
 
     #[cfg(not(unix))]
+    pub fn create_with_capacity(path: &Path, max_length: usize, capacity: usize) -> Result<Self, CreateError> {
+        let file = OpenOptions::new().create_new(true).open(path).map_err(|e| CreateError::Open(e))?;
+        let sources = Vec::with_capacity(capacity);
+        let slices = Vec::with_capacity(capacity);
+        Ok(WAL { file, offset: 0, max_length, queued: 0, sources, slices })
+    }
+
+    #[cfg(unix)]
+    pub fn create_with_capacity(path: &Path, max_length: usize, capacity: usize) -> Result<Self, CreateError> {
+        let dirname = path.parent().ok_or(CreateError::BadPath)?;
+        let dir = File::open(dirname).map_err(|e| CreateError::OpenDir(e))?;
+        let file = OpenOptions::new().create_new(true).open(path).map_err(|e| CreateError::Open(e))?;
+        dir.sync_all().map_err(|e| CreateError::Sync(e))?;
+        let sources = Vec::with_capacity(capacity);
+        let slices = Vec::with_capacity(capacity);
+        Ok(WAL { file, offset: 0, max_length, queued: 0, sources, slices })
+    }
+
+    #[cfg(not(unix))]
     pub fn create(path: &Path, max_length: usize) -> Result<Self, CreateError> {
         let file = OpenOptions::new().create_new(true).open(path).map_err(|e| CreateError::Open(e))?;
         Ok(WAL { file, offset: 0, max_length, queued: 0, sources: Vec::new(), slices: Vec::new() })
