@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, IoSlice, Seek, SeekFrom, Write};
 use std::iter::Iterator;
@@ -30,37 +31,41 @@ pub enum WriteError {
     Unsynced(Error, usize, usize),
 }
 
-pub struct WAL<'a> {
+pub struct WAL<'a, T> {
     file: File,
     offset: usize,
     queued: usize,
     max_length: usize,
-    sources: Vec<Box<[u8]>>,
+    sources: Vec<T>,
     slices: Vec<IoSlice<'a>>,
 }
 
-pub struct Wrote<'a> {
-    iter: Drain<'a, Box<[u8]>>,
+pub struct Wrote<'a, T>
+where T: Borrow<[u8]> {
+    iter: Drain<'a, T>,
     offset: &'a mut usize,
 }
 
-impl<'a> Iterator for Wrote<'a> {
-    type Item = (Box<[u8]>, usize);
+impl<'a, T> Iterator for Wrote<'a, T>
+where T: Borrow<[u8]> {
+    type Item = (T, usize);
     fn next(&mut self) -> Option<Self::Item> {
         let i = self.iter.next()?;
         let offset = *self.offset;
-        *self.offset += (*i).len();
+        *self.offset += i.borrow().len();
         Some((i, offset))
     }
 }
 
-impl<'a> Drop for Wrote<'a> {
+impl<'a, T> Drop for Wrote<'a, T> 
+where T: Borrow<[u8]> {
     fn drop(&mut self) {
         for _ in self {}
     }
 }
 
-impl<'a> WAL<'a> {
+impl<'a, T> WAL<'a, T>
+where T: Borrow<[u8]> {
     #[cfg(unix)]
     pub fn create(path: &Path, max_length: usize) -> Result<Self, CreateError> {
         let dirname = path.parent().ok_or(CreateError::BadPath)?;
@@ -86,21 +91,21 @@ impl<'a> WAL<'a> {
         }
     }
 
-    pub fn enqueue(&'a mut self, data: Box<[u8]>) -> Result<usize, EnqueueError> {
-        let new_len = (*data).len();
+    pub fn enqueue(&'a mut self, data: T) -> Result<usize, EnqueueError> {
+        let new_len = data.borrow().len();
         let cur_len = self.offset + self.queued;
         if (cur_len + new_len) > self.max_length {
             Err(EnqueueError::EndOfFile)
         } else {
             let i = self.sources.len();
             self.sources.push(data);
-            self.slices.push(IoSlice::new(&self.sources[i]));
+            self.slices.push(IoSlice::new(self.sources[i].borrow()));
             self.queued += new_len;
             Ok(cur_len)
         }
     }
     
-    pub fn write(&'a mut self) -> Result<Wrote<'a>, WriteError> {
+    pub fn write(&'a mut self) -> Result<Wrote<'a, T>, WriteError> {
         match sync_write_vectored(&mut self.file, &mut self.slices) {
             Ok((blocks, bytes)) => {
                 self.queued -= bytes;
