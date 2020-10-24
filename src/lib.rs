@@ -1,7 +1,7 @@
 use std::borrow::Borrow;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, IoSlice, Seek, SeekFrom, Write};
-use std::iter::Iterator;
+use std::iter::{ExactSizeIterator, Iterator};
 use std::path::Path;
 use std::vec::Drain;
 
@@ -28,7 +28,19 @@ pub enum EnqueueError {
 
 pub enum WriteError {
     Unwritten(Error),
-    Unsynced(Error, usize, usize),
+    Unsynced(Error, Stats),
+}
+
+#[derive(Clone, Copy)]
+pub struct Stats {
+    pub blocks: usize,
+    pub bytes: usize,
+}
+
+impl Stats {
+    fn new(blocks: usize, bytes: usize) -> Stats {
+        Stats { blocks, bytes }
+    }
 }
 
 pub struct WAL<'a, T> {
@@ -42,6 +54,9 @@ pub struct WAL<'a, T> {
 
 pub struct Wrote<'a, T>
 where T: Borrow<[u8]> {
+    pub before: Stats,
+    pub after: Stats,
+    pub wrote: Stats,
     iter: Drain<'a, T>,
     offset: &'a mut usize,
 }
@@ -55,7 +70,13 @@ where T: Borrow<[u8]> {
         *self.offset += i.borrow().len();
         Some((i, offset))
     }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
 }
+
+impl<'a, T> ExactSizeIterator for Wrote<'a, T>
+where T: Borrow<[u8]> {}
 
 impl<'a, T> Drop for Wrote<'a, T> 
 where T: Borrow<[u8]> {
@@ -137,26 +158,45 @@ where T: Borrow<[u8]> {
     }
     
     pub fn write(&'a mut self) -> Result<Wrote<'a, T>, WriteError> {
-        match sync_write_vectored(&mut self.file, &mut self.slices) {
-            Ok((blocks, bytes)) => {
-                self.queued -= bytes;
-                Ok(Wrote { iter: self.sources.drain(..blocks), offset: &mut self.offset })
-            }
-            Err(e) => {
-                if let WriteError::Unsynced(_, _, bytes) = e {
-                    self.queued -= bytes;
+        let old_queue_blocks = self.slices.len();
+        let old_queue_bytes = self.queued;
+        let before = Stats::new(old_queue_blocks, old_queue_bytes);
+        if old_queue_blocks == 0 {
+            Ok(Wrote {
+                before,
+                after: before,
+                wrote: Stats::new(0, 0),
+                iter: self.sources.drain(0..0),
+                offset: &mut self.offset,
+            })
+        } else {
+            let wrote_bytes = self.file.write_vectored(&mut self.slices).map_err(WriteError::Unwritten)?;
+            self.queued -= wrote_bytes;
+            if wrote_bytes == 0 {
+                Ok(Wrote {
+                    before,
+                    after: before,
+                    wrote: Stats::new(0, 0),
+                    iter: self.sources.drain(0..0),
+                    offset: &mut self.offset,
+                })
+            } else {
+                let new_queue_bytes = old_queue_bytes - wrote_bytes;
+                let new_queue_blocks = self.slices.len();
+                let wrote_blocks = old_queue_blocks - new_queue_blocks;
+                match File::sync_all(&self.file).map_err(|e| WriteError::Unsynced(e, Stats::new(wrote_blocks, wrote_bytes))) {
+                    Ok(()) => {
+                        Ok(Wrote {
+                            before,
+                            after: Stats::new(new_queue_blocks, new_queue_bytes),
+                            wrote: Stats::new(wrote_blocks, wrote_bytes),
+                            iter: self.sources.drain(..wrote_blocks),
+                            offset: &mut self.offset,
+                        })
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e)
             }
         }
     }
-}
-
-pub fn sync_write_vectored<'a>(file: &mut File, batch: &mut [IoSlice<'a>]) -> Result<(usize, usize), WriteError> {
-    let len = batch.len();
-    if len == 0 { return Ok((0, 0)); }
-    let bytes = file.write_vectored(batch).map_err(WriteError::Unwritten)?;
-    let blocks = batch.len() - len;
-    File::sync_all(file).map_err(|e| WriteError::Unsynced(e, blocks, bytes))?;
-    Ok((blocks, bytes))
 }
