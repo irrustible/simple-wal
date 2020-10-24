@@ -35,9 +35,9 @@ pub enum OpenError {
 
 /// There was an error queueing some data.
 #[derive(Debug)]
-pub enum EnqueueError<T> {
+pub enum EnqueueError {
     /// Enqueueing this would take us over the max_length provided.
-    EndOfFile(T),
+    EndOfFile,
 }
 
 /// There was an error writing some data.

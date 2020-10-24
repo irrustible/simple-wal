@@ -1,5 +1,4 @@
 use crate::*;
-use std::borrow::Borrow;
 use std::fs::{File, OpenOptions};
 use std::io::{IoSlice, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -13,17 +12,16 @@ use std::path::Path;
 /// buffer. When that buffer has been written safely to disk in its
 /// entirety, it returns it for reuse.
 #[derive(Debug)]
-pub struct WAL<'a, T> {
+pub struct WAL<'a> {
     pub max_bytes: usize,
     file: File,
     offset: usize,
     queued: usize,
-    sources: Vec<T>,
+    sources: Vec<&'a [u8]>,
     slices: Vec<IoSlice<'a>>,
 }
 
-impl<'a, T> WAL<'a, T>
-where T: Borrow<[u8]> {
+impl<'a> WAL<'a> {
     #[cfg(unix)]
     /// Creates a new WAL at the provided path, configuring the maximum file size.
     /// Errors out if there was an I/O error or the file already exists.
@@ -105,35 +103,29 @@ where T: Borrow<[u8]> {
     /// statistics of the queue with the newly queued data included.
     ///
     /// Fails if the data would take us over the max_bytes.
-    pub fn enqueue(&mut self, data: T) -> Result<Stats, EnqueueError<T>> {
-        let new_len = data.borrow().len();
+    pub fn enqueue(&mut self, data: &'a [u8]) -> Result<Stats, EnqueueError> {
+        let new_len = data.len();
         let cur_len = self.offset + self.queued;
         if (cur_len + new_len) > self.max_bytes {
-            Err(EnqueueError::EndOfFile(data))
+            Err(EnqueueError::EndOfFile)
         } else {
-            let i = self.sources.len();
             self.sources.push(data);
-            self.slices.push(IoSlice::new(self.sources[i].borrow()));
+            self.slices.push(IoSlice::new(data));
             self.queued += new_len;
             Ok(self.stats())
         }
     }
 
-    pub fn enqueue_all<U>(&'a mut self, data: U) -> Result<Stats, EnqueueError<U>>
-    where U: Borrow<[T]> + IntoIterator<Item=T> {
-        let blocks = data.borrow().len();
+    pub fn enqueue_all(&'a mut self, data: &mut [&'a [u8]]) -> Result<Stats, EnqueueError> {
         let mut bytes = 0;
-        for d in data.borrow() { bytes += d.borrow().len(); }
+        for d in data.iter() { bytes += d.len(); }
         let cur_len = self.offset + self.queued;
         if (cur_len + bytes) > self.max_bytes {
-            Err(EnqueueError::EndOfFile(data))
+            Err(EnqueueError::EndOfFile)
         } else {
-            let i = self.sources.len();
             for d in data.into_iter() {
                 self.sources.push(d);
-            }
-            for i in i..i+blocks {
-                self.slices.push(IoSlice::new(self.sources[i].borrow()));
+                self.slices.push(IoSlice::new(d));
             }
             self.queued += bytes;
             Ok(self.stats())
@@ -143,7 +135,7 @@ where T: Borrow<[u8]> {
     
     /// Writes and syncs as much of the queue as possible (in order).
     /// When no I/O error is encountered, returns information about the write.
-    pub fn write<'b>(&'a mut self) -> Result<Wrote<'b, T>, WriteError>
+    pub fn write<'b>(&'a mut self) -> Result<Wrote<'b>, WriteError>
     where 'a: 'b {
         let before = self.stats();
         if before.blocks == 0 {

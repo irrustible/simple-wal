@@ -21,10 +21,9 @@ fn test_simple() {
     let path: &Path = path.as_ref();
     remove_file(path); // in case we panic
     let _del = Delete(path);
-    let hello: Vec<u8> = HELLO.into();
     let mut wal = WAL::create(path.as_ref(), 1024).unwrap();
     {
-        wal.enqueue(hello).unwrap();
+        wal.enqueue(HELLO).unwrap();
     }
     // let mut w = wal.write().unwrap();
 }
@@ -33,18 +32,16 @@ fn test_simple() {
 #[allow(unused_must_use)]
 fn test_multi() {
     let mut path = temp_dir();
-    path.push("test_simple.wal");
+    path.push("test_multi.wal");
     let path: &Path = path.as_ref();
     remove_file(path); // in case we panic
     let _del = Delete(path);
-    let hello: Vec<u8> = HELLO.into();
-    let world: Vec<u8> = WORLD.into();
     let mut wal = WAL::create(path.as_ref(), 1024).unwrap();
     {
-        wal.enqueue(hello).unwrap();
+        wal.enqueue(HELLO).unwrap();
     }
     {
-        wal.enqueue(world).unwrap();
+        wal.enqueue(WORLD).unwrap();
     }
     // let mut w = wal.write().unwrap();
 }

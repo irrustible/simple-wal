@@ -8,18 +8,16 @@ use std::vec::Drain;
 ///  * Queue stats before and after this write
 ///  * Information about each block written (via `Iterator`)
 #[derive(Debug)]
-pub struct Wrote<'a, T>
-where T: Borrow<[u8]> {
+pub struct Wrote<'a> {
     pub before: Stats,
     pub after: Stats,
     pub wrote: Stats,
-    pub(crate) iter: Drain<'a, T>,
+    pub(crate) iter: Drain<'a, &'a [u8]>,
     pub(crate) offset: &'a mut usize,
 }
 
-impl<'a, T> Iterator for Wrote<'a, T>
-where T: Borrow<[u8]> {
-    type Item = (T, usize);
+impl<'a> Iterator for Wrote<'a> {
+    type Item = (&'a [u8], usize);
     fn next(&mut self) -> Option<Self::Item> {
         let i = self.iter.next()?;
         let offset = *self.offset;
@@ -31,11 +29,9 @@ where T: Borrow<[u8]> {
     }
 }
 
-impl<'a, T> ExactSizeIterator for Wrote<'a, T>
-where T: Borrow<[u8]> {}
+impl<'a> ExactSizeIterator for Wrote<'a> {}
 
-impl<'a, T> Drop for Wrote<'a, T> 
-where T: Borrow<[u8]> {
+impl<'a> Drop for Wrote<'a> {
     fn drop(&mut self) {
         while self.next().is_some() {}
     }
