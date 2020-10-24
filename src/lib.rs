@@ -1,39 +1,56 @@
-use std::borrow::Borrow;
-use std::fs::{File, OpenOptions};
-use std::io::{Error, IoSlice, Seek, SeekFrom, Write};
-use std::iter::{ExactSizeIterator, Iterator};
-use std::path::Path;
-use std::vec::Drain;
+use std::io::Error;
 
+mod wal;
+pub use wal::WAL;
+
+mod wrote;
+pub use wrote::Wrote;
+
+/// Something went wrong during creating a WAL
 pub enum CreateError {
+    /// An error occurred during opening the file.
     Open(Error),
     #[cfg(unix)]
-    /// The Path
+    /// We couldn't find the parent directory of the path. Did you pass us '/'?
     BadPath,
     #[cfg(unix)]
+    /// We couldn't open the parent directory (permissions?)
     OpenDir(Error),
     #[cfg(unix)]
+    /// There was an error syncing the parent directory.
     Sync(Error),
 }
 
+/// Something went wrong opening a WAL
 pub enum OpenError {
+    /// The file was bigger than the max_length provided.
     TooBig,
+    /// We couldn't seek to the end of the file.
     Seek(Error),
+    /// We couldn't open the file.
     Open(Error),
 }
 
+/// There was an error queueing some data.
 pub enum EnqueueError {
+    /// Enqueueing this would take us over the max_length provided.
     EndOfFile,
 }
 
+/// There was an error writing some data.
 pub enum WriteError {
+    /// The data was never written.
     Unwritten(Error),
+    /// The data was written, but syncing failed.
     Unsynced(Error, Stats),
 }
 
 #[derive(Clone, Copy)]
+/// The size of a queue or a write in blocks and bytes.
 pub struct Stats {
+    /// The number of blocks.
     pub blocks: usize,
+    /// The number of bytes.
     pub bytes: usize,
 }
 
@@ -43,160 +60,3 @@ impl Stats {
     }
 }
 
-pub struct WAL<'a, T> {
-    file: File,
-    offset: usize,
-    queued: usize,
-    max_length: usize,
-    sources: Vec<T>,
-    slices: Vec<IoSlice<'a>>,
-}
-
-pub struct Wrote<'a, T>
-where T: Borrow<[u8]> {
-    pub before: Stats,
-    pub after: Stats,
-    pub wrote: Stats,
-    iter: Drain<'a, T>,
-    offset: &'a mut usize,
-}
-
-impl<'a, T> Iterator for Wrote<'a, T>
-where T: Borrow<[u8]> {
-    type Item = (T, usize);
-    fn next(&mut self) -> Option<Self::Item> {
-        let i = self.iter.next()?;
-        let offset = *self.offset;
-        *self.offset += i.borrow().len();
-        Some((i, offset))
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.iter.size_hint()
-    }
-}
-
-impl<'a, T> ExactSizeIterator for Wrote<'a, T>
-where T: Borrow<[u8]> {}
-
-impl<'a, T> Drop for Wrote<'a, T> 
-where T: Borrow<[u8]> {
-    fn drop(&mut self) {
-        for _ in self {}
-    }
-}
-
-impl<'a, T> WAL<'a, T>
-where T: Borrow<[u8]> {
-    #[cfg(unix)]
-    pub fn create(path: &Path, max_length: usize) -> Result<Self, CreateError> {
-        let dirname = path.parent().ok_or(CreateError::BadPath)?;
-        let dir = File::open(dirname).map_err(|e| CreateError::OpenDir(e))?;
-        let file = OpenOptions::new().create_new(true).open(path).map_err(|e| CreateError::Open(e))?;
-        dir.sync_all().map_err(|e| CreateError::Sync(e))?;
-        Ok(WAL { file, offset: 0, max_length, queued: 0, sources: Vec::new(), slices: Vec::new() })
-    }
-
-    #[cfg(not(unix))]
-    pub fn create(path: &Path, max_length: usize) -> Result<Self, CreateError> {
-        let file = OpenOptions::new().create_new(true).open(path).map_err(|e| CreateError::Open(e))?;
-        Ok(WAL { file, offset: 0, max_length, queued: 0, sources: Vec::new(), slices: Vec::new() })
-    }
-
-    #[cfg(unix)]
-    pub fn create_with_capacity(path: &Path, max_length: usize, capacity: usize) -> Result<Self, CreateError> {
-        let dirname = path.parent().ok_or(CreateError::BadPath)?;
-        let dir = File::open(dirname).map_err(|e| CreateError::OpenDir(e))?;
-        let file = OpenOptions::new().create_new(true).open(path).map_err(|e| CreateError::Open(e))?;
-        dir.sync_all().map_err(|e| CreateError::Sync(e))?;
-        let sources = Vec::with_capacity(capacity);
-        let slices = Vec::with_capacity(capacity);
-        Ok(WAL { file, offset: 0, max_length, queued: 0, sources, slices })
-    }
-
-    #[cfg(not(unix))]
-    pub fn create_with_capacity(path: &Path, max_length: usize, capacity: usize) -> Result<Self, CreateError> {
-        let file = OpenOptions::new().create_new(true).open(path).map_err(|e| CreateError::Open(e))?;
-        let sources = Vec::with_capacity(capacity);
-        let slices = Vec::with_capacity(capacity);
-        Ok(WAL { file, offset: 0, max_length, queued: 0, sources, slices })
-    }
-
-    pub fn open(path: &Path, max_length: usize) -> Result<Self, OpenError> {
-        let mut file = OpenOptions::new().append(true).open(path).map_err(|e| OpenError::Open(e))?;
-        let offset = file.seek(SeekFrom::End(0)).map_err(OpenError::Seek)? as usize;
-        if offset >= max_length {
-            Err(OpenError::TooBig)
-        } else {
-            Ok(WAL { file, offset, max_length, queued: 0, sources: Vec::new(), slices: Vec::new() })
-        }
-    }
-
-    pub fn open_with_capacity(path: &Path, max_length: usize, capacity: usize) -> Result<Self, OpenError> {
-        let mut file = OpenOptions::new().append(true).open(path).map_err(|e| OpenError::Open(e))?;
-        let offset = file.seek(SeekFrom::End(0)).map_err(OpenError::Seek)? as usize;
-        if offset >= max_length {
-            Err(OpenError::TooBig)
-        } else {
-            let sources = Vec::with_capacity(capacity);
-            let slices = Vec::with_capacity(capacity);
-            Ok(WAL { file, offset, max_length, queued: 0, sources, slices })
-        }
-    }
-
-    pub fn enqueue(&'a mut self, data: T) -> Result<usize, EnqueueError> {
-        let new_len = data.borrow().len();
-        let cur_len = self.offset + self.queued;
-        if (cur_len + new_len) > self.max_length {
-            Err(EnqueueError::EndOfFile)
-        } else {
-            let i = self.sources.len();
-            self.sources.push(data);
-            self.slices.push(IoSlice::new(self.sources[i].borrow()));
-            self.queued += new_len;
-            Ok(cur_len)
-        }
-    }
-    
-    pub fn write(&'a mut self) -> Result<Wrote<'a, T>, WriteError> {
-        let old_queue_blocks = self.slices.len();
-        let old_queue_bytes = self.queued;
-        let before = Stats::new(old_queue_blocks, old_queue_bytes);
-        if old_queue_blocks == 0 {
-            Ok(Wrote {
-                before,
-                after: before,
-                wrote: Stats::new(0, 0),
-                iter: self.sources.drain(0..0),
-                offset: &mut self.offset,
-            })
-        } else {
-            let wrote_bytes = self.file.write_vectored(&mut self.slices).map_err(WriteError::Unwritten)?;
-            self.queued -= wrote_bytes;
-            if wrote_bytes == 0 {
-                Ok(Wrote {
-                    before,
-                    after: before,
-                    wrote: Stats::new(0, 0),
-                    iter: self.sources.drain(0..0),
-                    offset: &mut self.offset,
-                })
-            } else {
-                let new_queue_bytes = old_queue_bytes - wrote_bytes;
-                let new_queue_blocks = self.slices.len();
-                let wrote_blocks = old_queue_blocks - new_queue_blocks;
-                match File::sync_all(&self.file).map_err(|e| WriteError::Unsynced(e, Stats::new(wrote_blocks, wrote_bytes))) {
-                    Ok(()) => {
-                        Ok(Wrote {
-                            before,
-                            after: Stats::new(new_queue_blocks, new_queue_bytes),
-                            wrote: Stats::new(wrote_blocks, wrote_bytes),
-                            iter: self.sources.drain(..wrote_blocks),
-                            offset: &mut self.offset,
-                        })
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-        }
-    }
-}
