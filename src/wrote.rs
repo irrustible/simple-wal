@@ -7,6 +7,7 @@ use std::vec::Drain;
 ///  * Write stats
 ///  * Queue stats before and after this write
 ///  * Information about each block written (via `Iterator`)
+#[derive(Debug)]
 pub struct Wrote<'a, T>
 where T: Borrow<[u8]> {
     pub before: Stats,

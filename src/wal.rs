@@ -12,11 +12,12 @@ use std::path::Path;
 /// When enqueuing, the WAL takes temporary ownership of the
 /// buffer. When that buffer has been written safely to disk in its
 /// entirety, it returns it for reuse.
+#[derive(Debug)]
 pub struct WAL<'a, T> {
+    pub max_bytes: usize,
     file: File,
     offset: usize,
     queued: usize,
-    max_length: usize,
     sources: Vec<T>,
     slices: Vec<IoSlice<'a>>,
 }
@@ -26,98 +27,130 @@ where T: Borrow<[u8]> {
     #[cfg(unix)]
     /// Creates a new WAL at the provided path, configuring the maximum file size.
     /// Errors out if there was an I/O error or the file already exists.
-    pub fn create(path: &Path, max_length: usize) -> Result<Self, CreateError> {
+    pub fn create(path: &Path, max_bytes: usize) -> Result<Self, CreateError> {
         let dirname = path.parent().ok_or(CreateError::BadPath)?;
         let dir = File::open(dirname).map_err(|e| CreateError::OpenDir(e))?;
-        let file = OpenOptions::new().create_new(true).open(path).map_err(|e| CreateError::Open(e))?;
+        let file = OpenOptions::new()
+            .create_new(true).write(true)
+            .open(path).map_err(|e| CreateError::Open(e))?;
         dir.sync_all().map_err(|e| CreateError::Sync(e))?;
-        Ok(WAL { file, offset: 0, max_length, queued: 0, sources: Vec::new(), slices: Vec::new() })
+        Ok(WAL { file, offset: 0, max_bytes, queued: 0, sources: Vec::new(), slices: Vec::new() })
     }
 
     #[cfg(not(unix))]
     /// Creates a new WAL at the provided path, configuring the maximum file size.
     /// Errors out if there was an I/O error or the file already exists.
-    pub fn create(path: &Path, max_length: usize) -> Result<Self, CreateError> {
-        let file = OpenOptions::new().create_new(true).open(path).map_err(|e| CreateError::Open(e))?;
-        Ok(WAL { file, offset: 0, max_length, queued: 0, sources: Vec::new(), slices: Vec::new() })
+    pub fn create(path: &Path, max_bytes: usize) -> Result<Self, CreateError> {
+        let file = OpenOptions::new()
+            .create_new(true).write(true)
+            .open(path).map_err(|e| CreateError::Open(e))?;
+        Ok(WAL { file, offset: 0, max_bytes, queued: 0, sources: Vec::new(), slices: Vec::new() })
     }
 
     #[cfg(unix)]
     /// `create()`, but preallocating our internal vectors to minimise reallocation.
     /// Errors out if there was an I/O error or the file already exists.
-    pub fn create_with_capacity(path: &Path, max_length: usize, capacity: usize) -> Result<Self, CreateError> {
+    pub fn create_with_capacity(path: &Path, max_bytes: usize, capacity: usize) -> Result<Self, CreateError> {
         let dirname = path.parent().ok_or(CreateError::BadPath)?;
         let dir = File::open(dirname).map_err(|e| CreateError::OpenDir(e))?;
-        let file = OpenOptions::new().create_new(true).open(path).map_err(|e| CreateError::Open(e))?;
+        let file = OpenOptions::new()
+            .create_new(true).write(true)
+            .open(path).map_err(|e| CreateError::Open(e))?;
         dir.sync_all().map_err(|e| CreateError::Sync(e))?;
         let sources = Vec::with_capacity(capacity);
         let slices = Vec::with_capacity(capacity);
-        Ok(WAL { file, offset: 0, max_length, queued: 0, sources, slices })
+        Ok(WAL { file, offset: 0, max_bytes, queued: 0, sources, slices })
     }
 
     #[cfg(not(unix))]
     /// `create()`, but preallocating our internal vectors to minimise reallocation.
     /// Errors out if there was an I/O error or the file already exists.
-    pub fn create_with_capacity(path: &Path, max_length: usize, capacity: usize) -> Result<Self, CreateError> {
-        let file = OpenOptions::new().create_new(true).open(path).map_err(|e| CreateError::Open(e))?;
+    pub fn create_with_capacity(path: &Path, max_bytes: usize, capacity: usize) -> Result<Self, CreateError> {
+        let file = OpenOptions::new()
+            .create_new(true).write(true)
+            .open(path).map_err(|e| CreateError::Open(e))?;
         let sources = Vec::with_capacity(capacity);
         let slices = Vec::with_capacity(capacity);
-        Ok(WAL { file, offset: 0, max_length, queued: 0, sources, slices })
+        Ok(WAL { file, offset: 0, max_bytes, queued: 0, sources, slices })
     }
 
     /// Opens an existing WAL at the provided path, configuring the maximum file size.
     /// Errors out if there was an I/O error or the file is already at or over its maximum size.
-    pub fn open(path: &Path, max_length: usize) -> Result<Self, OpenError> {
-        let mut file = OpenOptions::new().append(true).open(path).map_err(|e| OpenError::Open(e))?;
+    pub fn open(path: &Path, max_bytes: usize) -> Result<Self, OpenError> {
+        let mut file = OpenOptions::new()
+            .read(true).append(true).open(path).map_err(|e| OpenError::Open(e))?;
         let offset = file.seek(SeekFrom::End(0)).map_err(OpenError::Seek)? as usize;
-        if offset >= max_length {
+        if offset >= max_bytes {
             Err(OpenError::TooBig)
         } else {
-            Ok(WAL { file, offset, max_length, queued: 0, sources: Vec::new(), slices: Vec::new() })
+            Ok(WAL { file, offset, max_bytes, queued: 0, sources: Vec::new(), slices: Vec::new() })
         }
     }
 
     /// `open()`, but preallocating our internal vectors to minimise reallocation.
     /// Errors out if there was an I/O error or the file is already at or over its maximum size.
-    pub fn open_with_capacity(path: &Path, max_length: usize, capacity: usize) -> Result<Self, OpenError> {
+    pub fn open_with_capacity(path: &Path, max_bytes: usize, capacity: usize) -> Result<Self, OpenError> {
         let mut file = OpenOptions::new().append(true).open(path).map_err(|e| OpenError::Open(e))?;
         let offset = file.seek(SeekFrom::End(0)).map_err(OpenError::Seek)? as usize;
-        if offset >= max_length {
+        if offset >= max_bytes {
             Err(OpenError::TooBig)
         } else {
             let sources = Vec::with_capacity(capacity);
             let slices = Vec::with_capacity(capacity);
-            Ok(WAL { file, offset, max_length, queued: 0, sources, slices })
+            Ok(WAL { file, offset, max_bytes, queued: 0, sources, slices })
         }
     }
 
-    /// Append an item to the queue for the next write.
-    /// Fails if the data would take us over the max_length.
-    pub fn enqueue(&'a mut self, data: T) -> Result<usize, EnqueueError> {
+    /// Append an item to the queue for the next write, returning the
+    /// statistics of the queue with the newly queued data included.
+    ///
+    /// Fails if the data would take us over the max_bytes.
+    pub fn enqueue(&mut self, data: T) -> Result<Stats, EnqueueError<T>> {
         let new_len = data.borrow().len();
         let cur_len = self.offset + self.queued;
-        if (cur_len + new_len) > self.max_length {
-            Err(EnqueueError::EndOfFile)
+        if (cur_len + new_len) > self.max_bytes {
+            Err(EnqueueError::EndOfFile(data))
         } else {
             let i = self.sources.len();
             self.sources.push(data);
             self.slices.push(IoSlice::new(self.sources[i].borrow()));
             self.queued += new_len;
-            Ok(cur_len)
+            Ok(self.stats())
         }
     }
+
+    pub fn enqueue_all<U>(&'a mut self, data: U) -> Result<Stats, EnqueueError<U>>
+    where U: Borrow<[T]> + IntoIterator<Item=T> {
+        let blocks = data.borrow().len();
+        let mut bytes = 0;
+        for d in data.borrow() { bytes += d.borrow().len(); }
+        let cur_len = self.offset + self.queued;
+        if (cur_len + bytes) > self.max_bytes {
+            Err(EnqueueError::EndOfFile(data))
+        } else {
+            let i = self.sources.len();
+            for d in data.into_iter() {
+                self.sources.push(d);
+            }
+            for i in i..i+blocks {
+                self.slices.push(IoSlice::new(self.sources[i].borrow()));
+            }
+            self.queued += bytes;
+            Ok(self.stats())
+        }
+    }
+
     
     /// Writes and syncs as much of the queue as possible (in order).
     /// When no I/O error is encountered, returns information about the write.
-    pub fn write(&'a mut self) -> Result<Wrote<'a, T>, WriteError> {
-        let old_queue_blocks = self.slices.len();
-        let old_queue_bytes = self.queued;
-        let before = Stats::new(old_queue_blocks, old_queue_bytes);
-        if old_queue_blocks == 0 {
+    pub fn write<'b>(&'a mut self) -> Result<Wrote<'b, T>, WriteError>
+    where 'a: 'b {
+        let before = self.stats();
+        if before.blocks == 0 {
             Ok(Wrote {
                 before,
                 after: before,
-                wrote: Stats::new(0, 0),
+                wrote: Stats::default(),
                 iter: self.sources.drain(0..0),
                 offset: &mut self.offset,
             })
@@ -128,21 +161,18 @@ where T: Borrow<[u8]> {
                 Ok(Wrote {
                     before,
                     after: before,
-                    wrote: Stats::new(0, 0),
+                    wrote: Stats::default(),
                     iter: self.sources.drain(0..0),
                     offset: &mut self.offset,
                 })
             } else {
-                let new_queue_bytes = old_queue_bytes - wrote_bytes;
-                let new_queue_blocks = self.slices.len();
-                let wrote_blocks = old_queue_blocks - new_queue_blocks;
-                match File::sync_all(&self.file).map_err(|e| WriteError::Unsynced(e, Stats::new(wrote_blocks, wrote_bytes))) {
+                let after = self.stats();
+                let wrote = Stats::new(before.blocks - after.blocks, wrote_bytes);
+                match File::sync_all(&self.file).map_err(|e| WriteError::Unsynced(e, wrote)) {
                     Ok(()) => {
                         Ok(Wrote {
-                            before,
-                            after: Stats::new(new_queue_blocks, new_queue_bytes),
-                            wrote: Stats::new(wrote_blocks, wrote_bytes),
-                            iter: self.sources.drain(..wrote_blocks),
+                            before, after, wrote,
+                            iter: self.sources.drain(..wrote.blocks),
                             offset: &mut self.offset,
                         })
                     }
@@ -150,5 +180,9 @@ where T: Borrow<[u8]> {
                 }
             }
         }
+    }
+
+    pub fn stats(&self) -> Stats {
+        Stats::new(self.slices.len(), self.queued)
     }
 }
