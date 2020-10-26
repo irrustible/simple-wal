@@ -100,6 +100,9 @@ impl WAL {
         WAL { cursor, partial: 0 }
     }
 
+    /// If this results in a partial write of a block, you must call
+    /// it again with the rest of that block as the first item in the
+    /// slice to make the partial block calculations work out.
     pub fn write(&mut self, blocks: &[IoSlice]) -> Result<Option<BlockWrite>, Error> {
         let mut write = self.cursor.write_blocks(blocks)?;
         if write.blocks == 0 {

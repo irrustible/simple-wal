@@ -31,17 +31,3 @@ fn test_simple() {
     assert_eq!(w.start_position, 0);
     assert_eq!(w.partial, 0);
 }
-
-// #[test]
-// #[allow(unused_must_use)]
-// fn test_multi() {
-//     let mut path = temp_dir();
-//     path.push("test_multi.wal");
-//     let path: &Path = path.as_ref();
-//     remove_file(path); // in case we panic
-//     let _del = Delete(path);
-//     let mut wal = WAL::create(path.as_ref(), 1024).unwrap();
-//     {
-//         wal.enqueue(HELLO).unwrap();
-//     }
-// }
