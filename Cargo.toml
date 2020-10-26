@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["James Laver <james.laver@gmail.com>"]
 edition = "2018"
 
-[dependencies]
+[target.'cfg(target_family="unix")'.dependencies]
+libc = "0.2.79"
 
 [dev-dependencies]
